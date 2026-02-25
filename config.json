@@ -1,0 +1,19 @@
+{
+  "ema_tolerance": 0.01,
+  "detection_ema_windows": [50, 200, 576],
+  "chart_ema_windows": [50, 200, 576, 676],
+  "stocks": [
+    { "code": "2330", "name_zh": "台積電", "yf_symbol": "2330.TW" },
+    { "code": "2317", "name_zh": "鴻海", "yf_symbol": "2317.TW" },
+    { "code": "2454", "name_zh": "聯發科", "yf_symbol": "2454.TW" },
+    { "code": "2308", "name_zh": "台達電", "yf_symbol": "2308.TW" },
+    { "code": "3711", "name_zh": "日月光投控", "yf_symbol": "3711.TW" },
+    { "code": "2891", "name_zh": "中信金", "yf_symbol": "2891.TW" },
+    { "code": "2881", "name_zh": "富邦金", "yf_symbol": "2881.TW" },
+    { "code": "2382", "name_zh": "廣達", "yf_symbol": "2382.TW" },
+    { "code": "2303", "name_zh": "聯電", "yf_symbol": "2303.TW" },
+    { "code": "2882", "name_zh": "國泰金", "yf_symbol": "2882.TW" },
+    { "code": "0050", "name_zh": "元大台灣50", "yf_symbol": "0050.TW" },
+    { "code": "8299", "name_zh": "群聯", "yf_symbol": "8299.TWO" }
+  ]
+}
