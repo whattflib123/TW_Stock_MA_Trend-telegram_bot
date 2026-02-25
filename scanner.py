@@ -5,7 +5,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional
 
 import mplfinance as mpf
 import pandas as pd
@@ -19,6 +19,17 @@ class StockItem:
     code: str
     name_zh: str
     yf_symbol: str
+    stress_rule: "StressRule"
+
+
+@dataclass(frozen=True)
+class StressRule:
+    stock_drop_1d: float
+    stock_drop_10d: float
+    rsi_threshold: float
+    ma_window: int
+    volume_avg_window: int
+    volume_spike_multiplier: float
 
 
 @dataclass(frozen=True)
@@ -26,7 +37,22 @@ class AppConfig:
     ema_tolerance: float
     detection_ema_windows: List[int]
     chart_ema_windows: List[int]
+    market_symbol: str
+    market_drop_1d: float
+    market_drop_5d: float
+    required_stress_hits: int
     stocks: List[StockItem]
+
+
+def parse_stress_rule(raw_rule: Dict[str, object]) -> StressRule:
+    return StressRule(
+        stock_drop_1d=float(raw_rule.get("stock_drop_1d", 0.06)),
+        stock_drop_10d=float(raw_rule.get("stock_drop_10d", 0.15)),
+        rsi_threshold=float(raw_rule.get("rsi_threshold", 28.0)),
+        ma_window=int(raw_rule.get("ma_window", 120)),
+        volume_avg_window=int(raw_rule.get("volume_avg_window", 20)),
+        volume_spike_multiplier=float(raw_rule.get("volume_spike_multiplier", 1.8)),
+    )
 
 
 def load_config(config_path: Path) -> AppConfig:
@@ -36,19 +62,37 @@ def load_config(config_path: Path) -> AppConfig:
     with config_path.open("r", encoding="utf-8") as f:
         raw = json.load(f)
 
+    stress_defaults = parse_stress_rule(raw.get("stress_rule_defaults", {}))
+
     stocks: List[StockItem] = []
     for item in raw.get("stocks", []):
+        stock_override = item.get("stress_rule_override", {})
+        merged_rule = {
+            "stock_drop_1d": stock_override.get("stock_drop_1d", stress_defaults.stock_drop_1d),
+            "stock_drop_10d": stock_override.get("stock_drop_10d", stress_defaults.stock_drop_10d),
+            "rsi_threshold": stock_override.get("rsi_threshold", stress_defaults.rsi_threshold),
+            "ma_window": stock_override.get("ma_window", stress_defaults.ma_window),
+            "volume_avg_window": stock_override.get("volume_avg_window", stress_defaults.volume_avg_window),
+            "volume_spike_multiplier": stock_override.get(
+                "volume_spike_multiplier", stress_defaults.volume_spike_multiplier
+            ),
+        }
         stocks.append(
             StockItem(
                 code=str(item["code"]),
                 name_zh=str(item["name_zh"]),
                 yf_symbol=str(item["yf_symbol"]),
+                stress_rule=parse_stress_rule(merged_rule),
             )
         )
 
     detection = [int(x) for x in raw.get("detection_ema_windows", [50, 200, 576])]
     chart = [int(x) for x in raw.get("chart_ema_windows", [50, 200, 576, 676])]
     tolerance = float(raw.get("ema_tolerance", 0.01))
+    market_symbol = str(raw.get("market_symbol", "^TWII"))
+    market_drop_1d = float(raw.get("market_drop_1d", 0.04))
+    market_drop_5d = float(raw.get("market_drop_5d", 0.08))
+    required_stress_hits = int(raw.get("required_stress_hits", 3))
 
     if not stocks:
         raise ValueError("config stocks is empty")
@@ -58,11 +102,17 @@ def load_config(config_path: Path) -> AppConfig:
         raise ValueError("config chart_ema_windows is empty")
     if tolerance <= 0:
         raise ValueError("config ema_tolerance must be positive")
+    if required_stress_hits < 1 or required_stress_hits > 4:
+        raise ValueError("config required_stress_hits must be in [1, 4]")
 
     return AppConfig(
         ema_tolerance=tolerance,
         detection_ema_windows=detection,
         chart_ema_windows=chart,
+        market_symbol=market_symbol,
+        market_drop_1d=market_drop_1d,
+        market_drop_5d=market_drop_5d,
+        required_stress_hits=required_stress_hits,
         stocks=stocks,
     )
 
@@ -93,6 +143,46 @@ def near_ema_list(latest_row: pd.Series, tolerance: float, ema_windows: List[int
         if diff_ratio <= tolerance:
             hit_windows.append(w)
     return hit_windows
+
+
+def pct_change(close_series: pd.Series, lookback_days: int) -> Optional[float]:
+    if len(close_series) <= lookback_days:
+        return None
+    curr = float(close_series.iloc[-1])
+    prev = float(close_series.iloc[-1 - lookback_days])
+    if prev <= 0:
+        return None
+    return (curr - prev) / prev
+
+
+def calc_rsi(close_series: pd.Series, period: int = 14) -> Optional[float]:
+    if len(close_series) < period + 1:
+        return None
+    delta = close_series.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    rsi = 100 - (100 / (1 + rs))
+    last = rsi.iloc[-1]
+    if pd.isna(last):
+        return None
+    return float(last)
+
+
+def fmt_pct(ratio: Optional[float]) -> str:
+    if ratio is None:
+        return "N/A"
+    return f"{ratio * 100:.2f}%"
+
+
+def compare_md(series: pd.Series, lookback_days: int) -> str:
+    if len(series) <= lookback_days:
+        return "N/A"
+    start = pd.Timestamp(series.index[-1 - lookback_days]).strftime("%m/%d")
+    end = pd.Timestamp(series.index[-1]).strftime("%m/%d")
+    return f"{start}->{end}"
 
 
 def to_weekly_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
@@ -214,6 +304,8 @@ def main() -> None:
 
     config = load_config(config_file)
     triggered = 0
+    market_df = fetch_daily_history(config.market_symbol)
+    market_close = market_df["Close"]
 
     for stock in config.stocks:
         try:
@@ -221,26 +313,96 @@ def main() -> None:
             df = add_ema_columns(raw_df, config.chart_ema_windows)
             latest = df.iloc[-1]
             latest_date = pd.Timestamp(df.index[-1]).date().isoformat()
+            latest_md = pd.Timestamp(df.index[-1]).strftime("%m/%d")
+            close_price = float(latest["Close"])
+            close_series = df["Close"]
+            volume_series = df["Volume"]
+
+            market_upto_today = market_close[market_close.index <= df.index[-1]]
+            market_drop_1d = pct_change(market_upto_today, 1)
+            market_drop_5d = pct_change(market_upto_today, 5)
+            market_hit = (
+                (market_drop_1d is not None and market_drop_1d <= -config.market_drop_1d)
+                or (market_drop_5d is not None and market_drop_5d <= -config.market_drop_5d)
+            )
+
+            stock_drop_1d = pct_change(close_series, 1)
+            stock_drop_10d = pct_change(close_series, 10)
+            stock_hit = (
+                (stock_drop_1d is not None and stock_drop_1d <= -stock.stress_rule.stock_drop_1d)
+                or (stock_drop_10d is not None and stock_drop_10d <= -stock.stress_rule.stock_drop_10d)
+            )
+
+            rsi_value = calc_rsi(close_series, period=14)
+            ma_series = close_series.rolling(window=stock.stress_rule.ma_window).mean()
+            ma_value = float(ma_series.iloc[-1]) if not pd.isna(ma_series.iloc[-1]) else None
+            technical_hit = (
+                (rsi_value is not None and rsi_value < stock.stress_rule.rsi_threshold)
+                or (ma_value is not None and close_price < ma_value)
+            )
+
+            volume_avg = volume_series.rolling(window=stock.stress_rule.volume_avg_window).mean()
+            volume_avg_value = float(volume_avg.iloc[-1]) if not pd.isna(volume_avg.iloc[-1]) else None
+            latest_volume = float(volume_series.iloc[-1])
+            volume_hit = (
+                volume_avg_value is not None
+                and latest_volume >= volume_avg_value * stock.stress_rule.volume_spike_multiplier
+            )
+
+            stress_hits = [market_hit, stock_hit, technical_hit, volume_hit]
+            stress_hit_count = sum(1 for x in stress_hits if x)
+            stress_hit = stress_hit_count >= config.required_stress_hits
 
             hit_windows = near_ema_list(
                 latest, tolerance=config.ema_tolerance, ema_windows=config.detection_ema_windows
             )
-            if not hit_windows:
+
+            if not hit_windows and not stress_hit:
                 continue
 
-            close_price = float(latest["Close"])
             ema50 = float(latest["EMA50"])
             ema200 = float(latest["EMA200"])
             bullish = "是" if ema50 > ema200 else "否"
 
-            near_text = ", ".join([f"EMA{w}" for w in hit_windows])
-            caption = (
-                f"{stock.code} {stock.name_zh}\n"
-                f"日期: {latest_date}\n"
-                f"收盤價: {close_price:.2f}\n"
-                f"接近均線: {near_text} (±{config.ema_tolerance * 100:.1f}%)\n"
-                f"EMA50/EMA200 多頭排列: {bullish}"
-            )
+            caption_lines = [
+                f"{stock.code} {stock.name_zh}",
+                f"日期: {latest_date}",
+                f"收盤價: {close_price:.2f}",
+            ]
+
+            if hit_windows:
+                near_text = ", ".join([f"EMA{w}" for w in hit_windows])
+                caption_lines.append(f"接近均線: {near_text} (±{config.ema_tolerance * 100:.1f}%)")
+                caption_lines.append(f"EMA50/EMA200 多頭排列: {bullish}")
+
+            if stress_hit:
+                stock_prev_md = pd.Timestamp(df.index[-2]).strftime("%m/%d") if len(df) >= 2 else "N/A"
+                caption_lines.append(f"風險訊號: {stress_hit_count}/4 類命中（門檻 {config.required_stress_hits}）")
+                caption_lines.append(
+                    f"① 指數急殺: {'命中' if market_hit else '未命中'} "
+                    f"(1日 {fmt_pct(market_drop_1d)} {compare_md(market_upto_today, 1)} / "
+                    f"5日 {fmt_pct(market_drop_5d)} {compare_md(market_upto_today, 5)})"
+                )
+                caption_lines.append(
+                    f"② {stock.name_zh}超跌: {'命中' if stock_hit else '未命中'} "
+                    f"(比較日 {stock_prev_md}->{latest_md}, 1日 {fmt_pct(stock_drop_1d)} / 10日 {fmt_pct(stock_drop_10d)})"
+                )
+                ma_text = f"{ma_value:.2f}" if ma_value is not None else "N/A"
+                rsi_text = f"{rsi_value:.2f}" if rsi_value is not None else "N/A"
+                caption_lines.append(
+                    f"③ 技術極端: {'命中' if technical_hit else '未命中'} "
+                    f"(RSI {rsi_text}, MA{stock.stress_rule.ma_window} {ma_text})"
+                )
+                if volume_avg_value is not None and volume_avg_value > 0:
+                    vol_ratio = latest_volume / volume_avg_value
+                    caption_lines.append(
+                        f"④ 量能爆量: {'命中' if volume_hit else '未命中'} "
+                        f"(當日 {latest_volume:.0f}, {stock.stress_rule.volume_avg_window}日均 {volume_avg_value:.0f}, 倍數 {vol_ratio:.2f}x)"
+                    )
+                else:
+                    caption_lines.append(f"④ 量能爆量: {'命中' if volume_hit else '未命中'} (資料不足)")
+
+            caption = "\n".join(caption_lines)
 
             daily_chart_path = chart_dir / f"{stock.code}_{latest_date}_daily.png"
             weekly_chart_path = chart_dir / f"{stock.code}_{latest_date}_weekly.png"
@@ -249,12 +411,17 @@ def main() -> None:
             send_photo(token, chat_id, daily_chart_path, caption + "\n圖表: 近一年日K")
             send_photo(token, chat_id, weekly_chart_path)
             triggered += 1
-            print(f"[SENT] {stock.code} {stock.name_zh}: {near_text}")
+            signal_tags: List[str] = []
+            if hit_windows:
+                signal_tags.append(f"EMA({', '.join([str(w) for w in hit_windows])})")
+            if stress_hit:
+                signal_tags.append(f"Stress({stress_hit_count}/4)")
+            print(f"[SENT] {stock.code} {stock.name_zh}: {' + '.join(signal_tags)}")
         except Exception as exc:
             print(f"[ERROR] {stock.code} {stock.name_zh}: {exc}")
 
     if triggered == 0:
-        send_message(token, chat_id, "本次掃描完成：沒有商品符合 EMA 接近條件。")
+        send_message(token, chat_id, "本次掃描完成：沒有商品符合 EMA 接近或風險 4 選 3 條件。")
     print(f"Done. Triggered {triggered} stock(s).")
 
 
