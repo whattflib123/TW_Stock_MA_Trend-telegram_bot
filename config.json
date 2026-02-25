@@ -134,6 +134,26 @@
         "rsi_threshold": 35,
         "volume_spike_multiplier": 2.0
       }
+    },
+    {
+      "code": "3034",
+      "name_zh": "聯詠",
+      "yf_symbol": "3034.TW",
+      "stress_rule_override": {
+        "stock_drop_10d": 0.20,
+        "rsi_threshold": 30,
+        "volume_spike_multiplier": 2.0
+      }
+    },
+    {
+      "code": "2379",
+      "name_zh": "瑞昱",
+      "yf_symbol": "2379.TW",
+      "stress_rule_override": {
+        "stock_drop_10d": 0.18,
+        "rsi_threshold": 30,
+        "volume_spike_multiplier": 2.0
+      }
     }
   ]
 }
