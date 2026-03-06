@@ -115,9 +115,11 @@ PY
 - 日線收盤價接近 EMA50/EMA200/EMA576（±1%）時通知
 - 風險條件 4 類中命中至少 3 類時通知（門檻可調）
 - 同一檔同時命中 EMA 與風險條件時，合併在同一則通知
+- 若某檔在上一次執行有命中，本次執行且未命中時仍會補發一次訊息與日線圖（可跨週末/假日，不附周線圖）
 - 訊息內容包含：
   - 商品代號 + 中文名稱
   - 最新可得日線收盤價
+  - 與昨天相比漲跌幅（%）
   - 接近哪一條（或多條）均線
   - `EMA50 > EMA200` 是否成立（多頭排列）
   - 風險 4 類條件是否命中與關鍵數值（大盤跌幅、個股跌幅、RSI/MA、量能倍數）
@@ -148,6 +150,7 @@ TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_CHAT_ID=your_chat_id_here
 CONFIG_FILE=config.json
 CHART_DIR=charts
+MEMORY_FILE=alert_memory.json
 ```
 
 3. 編輯 `config.json` 調整監控商品、EMA 與容許誤差。

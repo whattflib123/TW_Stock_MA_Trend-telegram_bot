@@ -4,8 +4,9 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import mplfinance as mpf
 import pandas as pd
@@ -289,6 +290,44 @@ def cleanup_old_charts(chart_dir: Path) -> None:
             p.unlink()
 
 
+def load_alert_memory(memory_file: Path) -> Dict[str, Any]:
+    if not memory_file.exists():
+        return {"last_run_date": "", "hit_codes": [], "pending_followup_codes": []}
+    try:
+        with memory_file.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
+        last_run_date = str(raw.get("last_run_date", ""))
+        hit_codes_raw = raw.get("hit_codes", [])
+        pending_followup_raw = raw.get("pending_followup_codes")
+        if not isinstance(hit_codes_raw, list):
+            hit_codes_raw = []
+        if pending_followup_raw is None:
+            pending_followup_raw = hit_codes_raw
+        if not isinstance(pending_followup_raw, list):
+            pending_followup_raw = []
+        hit_codes = [str(code) for code in hit_codes_raw]
+        pending_followup_codes = [str(code) for code in pending_followup_raw]
+        return {
+            "last_run_date": last_run_date,
+            "hit_codes": hit_codes,
+            "pending_followup_codes": pending_followup_codes,
+        }
+    except Exception:
+        return {"last_run_date": "", "hit_codes": [], "pending_followup_codes": []}
+
+
+def save_alert_memory(
+    memory_file: Path, run_date: date, hit_codes: Set[str], pending_followup_codes: Set[str]
+) -> None:
+    payload = {
+        "last_run_date": run_date.isoformat(),
+        "hit_codes": sorted(hit_codes),
+        "pending_followup_codes": sorted(pending_followup_codes),
+    }
+    with memory_file.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
 def main() -> None:
     load_dotenv()
 
@@ -296,6 +335,7 @@ def main() -> None:
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     config_file = Path(os.getenv("CONFIG_FILE", "config.json"))
     chart_dir = Path(os.getenv("CHART_DIR", "charts"))
+    memory_file = Path(os.getenv("MEMORY_FILE", "alert_memory.json"))
     chart_dir.mkdir(parents=True, exist_ok=True)
     cleanup_old_charts(chart_dir)
 
@@ -303,7 +343,15 @@ def main() -> None:
         raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set")
 
     config = load_config(config_file)
-    triggered = 0
+    triggered_today = 0
+    followup_from_previous_run = 0
+    sent_total = 0
+    today_hit_codes: Set[str] = set()
+    today_run_date = date.today()
+    memory = load_alert_memory(memory_file)
+    pending_followup_codes = {str(x) for x in memory.get("pending_followup_codes", [])}
+    unresolved_followup_codes = set(pending_followup_codes)
+
     market_df = fetch_daily_history(config.market_symbol)
     market_close = market_df["Close"]
 
@@ -356,26 +404,41 @@ def main() -> None:
             hit_windows = near_ema_list(
                 latest, tolerance=config.ema_tolerance, ema_windows=config.detection_ema_windows
             )
+            today_hit = bool(hit_windows) or stress_hit
+            followup_due = stock.code in pending_followup_codes
+            followup_only = followup_due and not today_hit
 
-            if not hit_windows and not stress_hit:
+            if not today_hit and not followup_only:
                 continue
+            if today_hit:
+                today_hit_codes.add(stock.code)
 
             ema50 = float(latest["EMA50"])
             ema200 = float(latest["EMA200"])
             bullish = "是" if ema50 > ema200 else "否"
 
-            caption_lines = [
-                f"{stock.code} {stock.name_zh}",
-                f"日期: {latest_date}",
-                f"收盤價: {close_price:.2f}",
-            ]
+            if followup_only:
+                caption_lines = [
+                    f"{stock.code} {stock.name_zh}",
+                    f"日期: {latest_date}",
+                    f"追蹤回報: 上次已觸發，本次固定回報一次",
+                    f"前一天漲跌幅: {fmt_pct(stock_drop_1d)} ({compare_md(close_series, 1)})",
+                    f"最新收盤價: {close_price:.2f}",
+                ]
+            else:
+                caption_lines = [
+                    f"{stock.code} {stock.name_zh}",
+                    f"日期: {latest_date}",
+                    f"收盤價: {close_price:.2f}",
+                    f"與昨日相比: {fmt_pct(stock_drop_1d)} ({compare_md(close_series, 1)})",
+                ]
 
-            if hit_windows:
+            if not followup_only and hit_windows:
                 near_text = ", ".join([f"EMA{w}" for w in hit_windows])
                 caption_lines.append(f"接近均線: {near_text} (±{config.ema_tolerance * 100:.1f}%)")
                 caption_lines.append(f"EMA50/EMA200 多頭排列: {bullish}")
 
-            if stress_hit:
+            if not followup_only and stress_hit:
                 stock_prev_md = pd.Timestamp(df.index[-2]).strftime("%m/%d") if len(df) >= 2 else "N/A"
                 caption_lines.append(f"風險訊號: {stress_hit_count}/4 類命中（門檻 {config.required_stress_hits}）")
                 caption_lines.append(
@@ -407,22 +470,38 @@ def main() -> None:
             daily_chart_path = chart_dir / f"{stock.code}_{latest_date}_daily.png"
             weekly_chart_path = chart_dir / f"{stock.code}_{latest_date}_weekly.png"
             create_daily_chart(df, stock, daily_chart_path, config.chart_ema_windows)
-            create_weekly_chart(df, stock, weekly_chart_path, config.chart_ema_windows)
             send_photo(token, chat_id, daily_chart_path, caption + "\n圖表: 近一年日K")
-            send_photo(token, chat_id, weekly_chart_path)
-            triggered += 1
+            if not followup_only:
+                create_weekly_chart(df, stock, weekly_chart_path, config.chart_ema_windows)
+                send_photo(token, chat_id, weekly_chart_path)
+
+            sent_total += 1
+            if today_hit:
+                triggered_today += 1
+            if followup_only:
+                followup_from_previous_run += 1
+            if followup_due:
+                unresolved_followup_codes.discard(stock.code)
             signal_tags: List[str] = []
-            if hit_windows:
+            if not followup_only and hit_windows:
                 signal_tags.append(f"EMA({', '.join([str(w) for w in hit_windows])})")
-            if stress_hit:
+            if not followup_only and stress_hit:
                 signal_tags.append(f"Stress({stress_hit_count}/4)")
+            if followup_only:
+                signal_tags.append("FollowUp(PreviousRunHit)")
             print(f"[SENT] {stock.code} {stock.name_zh}: {' + '.join(signal_tags)}")
         except Exception as exc:
             print(f"[ERROR] {stock.code} {stock.name_zh}: {exc}")
 
-    if triggered == 0:
+    next_pending_followup_codes = set(today_hit_codes) | unresolved_followup_codes
+    save_alert_memory(memory_file, today_run_date, today_hit_codes, next_pending_followup_codes)
+
+    if sent_total == 0:
         send_message(token, chat_id, "本次掃描完成：沒有商品符合 EMA 接近或風險 4 選 3 條件。")
-    print(f"Done. Triggered {triggered} stock(s).")
+    print(
+        f"Done. Sent {sent_total} stock(s). "
+        f"TodayTriggered={triggered_today}, FollowUpFromPreviousRun={followup_from_previous_run}."
+    )
 
 
 if __name__ == "__main__":
