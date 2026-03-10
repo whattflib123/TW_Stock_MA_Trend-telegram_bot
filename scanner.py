@@ -175,7 +175,25 @@ def calc_rsi(close_series: pd.Series, period: int = 14) -> Optional[float]:
 def fmt_pct(ratio: Optional[float]) -> str:
     if ratio is None:
         return "N/A"
-    return f"{ratio * 100:.2f}%"
+    return f"{ratio * 100:+.2f}%"
+
+
+def fmt_pct_trend(ratio: Optional[float]) -> str:
+    if ratio is None:
+        return "⚪ N/A"
+    if ratio > 0:
+        return f"📈 {ratio * 100:+.2f}%"
+    if ratio < 0:
+        return f"📉 {ratio * 100:+.2f}%"
+    return f"⚪ {ratio * 100:+.2f}%"
+
+
+def fmt_hit(hit: bool) -> str:
+    return "✅命中" if hit else "❌未命中"
+
+
+def fmt_bullish(is_bullish: bool) -> str:
+    return "🟢多頭" if is_bullish else "🔴空頭"
 
 
 def compare_md(series: pd.Series, lookback_days: int) -> str:
@@ -422,7 +440,7 @@ def main() -> None:
                     f"{stock.code} {stock.name_zh}",
                     f"日期: {latest_date}",
                     f"追蹤回報: 上次已觸發，本次固定回報一次",
-                    f"前一天漲跌幅: {fmt_pct(stock_drop_1d)} ({compare_md(close_series, 1)})",
+                    f"前一天漲跌幅: {fmt_pct_trend(stock_drop_1d)} ({compare_md(close_series, 1)})",
                     f"最新收盤價: {close_price:.2f}",
                 ]
             else:
@@ -430,47 +448,47 @@ def main() -> None:
                     f"{stock.code} {stock.name_zh}",
                     f"日期: {latest_date}",
                     f"收盤價: {close_price:.2f}",
-                    f"與昨日相比: {fmt_pct(stock_drop_1d)} ({compare_md(close_series, 1)})",
+                    f"與昨日相比: {fmt_pct_trend(stock_drop_1d)} ({compare_md(close_series, 1)})",
                 ]
 
             if not followup_only and hit_windows:
                 near_text = ", ".join([f"EMA{w}" for w in hit_windows])
-                caption_lines.append(f"接近均線: {near_text} (±{config.ema_tolerance * 100:.1f}%)")
-                caption_lines.append(f"EMA50/EMA200 多頭排列: {bullish}")
+                caption_lines.append(f"🎯 接近均線: {near_text} (±{config.ema_tolerance * 100:.1f}%)")
+                caption_lines.append(f"EMA50/EMA200 多頭排列: {fmt_bullish(ema50 > ema200)}")
 
             if not followup_only and stress_hit:
                 stock_prev_md = pd.Timestamp(df.index[-2]).strftime("%m/%d") if len(df) >= 2 else "N/A"
-                caption_lines.append(f"風險訊號: {stress_hit_count}/4 類命中（門檻 {config.required_stress_hits}）")
+                caption_lines.append(f"🚨 風險訊號: {stress_hit_count}/4 類命中（門檻 {config.required_stress_hits}）")
                 caption_lines.append(
-                    f"① 指數急殺: {'命中' if market_hit else '未命中'} "
+                    f"① 指數急殺: {fmt_hit(market_hit)} "
                     f"(1日 {fmt_pct(market_drop_1d)} {compare_md(market_upto_today, 1)} / "
                     f"5日 {fmt_pct(market_drop_5d)} {compare_md(market_upto_today, 5)})"
                 )
                 caption_lines.append(
-                    f"② {stock.name_zh}超跌: {'命中' if stock_hit else '未命中'} "
+                    f"② {stock.name_zh}超跌: {fmt_hit(stock_hit)} "
                     f"(比較日 {stock_prev_md}->{latest_md}, 1日 {fmt_pct(stock_drop_1d)} / 10日 {fmt_pct(stock_drop_10d)})"
                 )
                 ma_text = f"{ma_value:.2f}" if ma_value is not None else "N/A"
                 rsi_text = f"{rsi_value:.2f}" if rsi_value is not None else "N/A"
                 caption_lines.append(
-                    f"③ 技術極端: {'命中' if technical_hit else '未命中'} "
+                    f"③ 技術極端: {fmt_hit(technical_hit)} "
                     f"(RSI {rsi_text}, MA{stock.stress_rule.ma_window} {ma_text})"
                 )
                 if volume_avg_value is not None and volume_avg_value > 0:
                     vol_ratio = latest_volume / volume_avg_value
                     caption_lines.append(
-                        f"④ 量能爆量: {'命中' if volume_hit else '未命中'} "
+                        f"④ 量能爆量: {fmt_hit(volume_hit)} "
                         f"(當日 {latest_volume:.0f}, {stock.stress_rule.volume_avg_window}日均 {volume_avg_value:.0f}, 倍數 {vol_ratio:.2f}x)"
                     )
                 else:
-                    caption_lines.append(f"④ 量能爆量: {'命中' if volume_hit else '未命中'} (資料不足)")
+                    caption_lines.append(f"④ 量能爆量: {fmt_hit(volume_hit)} (資料不足)")
 
             caption = "\n".join(caption_lines)
 
             daily_chart_path = chart_dir / f"{stock.code}_{latest_date}_daily.png"
             weekly_chart_path = chart_dir / f"{stock.code}_{latest_date}_weekly.png"
             create_daily_chart(df, stock, daily_chart_path, config.chart_ema_windows)
-            send_photo(token, chat_id, daily_chart_path, caption + "\n圖表: 近一年日K")
+            send_photo(token, chat_id, daily_chart_path, caption + "\n🖼️ 圖表: 近一年日K")
             if not followup_only:
                 create_weekly_chart(df, stock, weekly_chart_path, config.chart_ema_windows)
                 send_photo(token, chat_id, weekly_chart_path)
@@ -497,7 +515,7 @@ def main() -> None:
     save_alert_memory(memory_file, today_run_date, today_hit_codes, next_pending_followup_codes)
 
     if sent_total == 0:
-        send_message(token, chat_id, "本次掃描完成：沒有商品符合 EMA 接近或風險 4 選 3 條件。")
+        send_message(token, chat_id, "ℹ️ 本次掃描完成：沒有商品符合 EMA 接近或風險 4 選 3 條件。")
     print(
         f"Done. Sent {sent_total} stock(s). "
         f"TodayTriggered={triggered_today}, FollowUpFromPreviousRun={followup_from_previous_run}."
