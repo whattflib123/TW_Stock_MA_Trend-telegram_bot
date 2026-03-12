@@ -262,6 +262,16 @@ def hit_status_emoji(hit: bool) -> str:
     return "🟢" if hit else "⚪"
 
 
+def daily_change_text(change_ratio: Optional[float]) -> str:
+    if change_ratio is None:
+        return "⚪ N/A"
+    if change_ratio > 0:
+        return f"📈 +{change_ratio * 100:.2f}%"
+    if change_ratio < 0:
+        return f"📉 {change_ratio * 100:.2f}%"
+    return "⚪ 0.00%"
+
+
 def compare_md(series: pd.Series, lookback_days: int) -> str:
     if len(series) <= lookback_days:
         return "N/A"
@@ -454,6 +464,7 @@ def main() -> None:
                 f"{stock.code} {stock.name_zh}",
                 f"日期: {latest_date}",
                 f"收盤價: {close_price:.2f}",
+                f"與昨日相比: {daily_change_text(stock_drop_1d)}",
             ]
             ma_text = f"{ma_value:.2f}" if ma_value is not None else "N/A"
             rsi_text = f"{rsi_value:.2f}" if rsi_value is not None else "N/A"
@@ -475,9 +486,11 @@ def main() -> None:
                 caption_lines.append(f"EMA50/EMA200 多頭排列: {bullish}")
 
             if stress_hit:
+                if hit_windows:
+                    caption_lines.append("")
                 caption_lines.append(f"風險訊號: {stress_hit_count}/4 類命中（門檻 {config.required_stress_hits}）")
                 caption_lines.append(
-                    f"① 指數急殺: {hit_status_emoji(market_hit)} "
+                    f"① 大盤急殺: {hit_status_emoji(market_hit)} "
                     f"(1日跌幅 {fmt_drop_threshold_pct(market_drop_1d, config.market_drop_1d)} / "
                     f"5日跌幅 {fmt_drop_threshold_pct(market_drop_5d, config.market_drop_5d)})"
                 )
