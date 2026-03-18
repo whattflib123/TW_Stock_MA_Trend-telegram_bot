@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import mplfinance as mpf
+import matplotlib.pyplot as plt
 import pandas as pd
 import requests
 import yfinance as yf
@@ -87,7 +88,7 @@ def load_config(config_path: Path) -> AppConfig:
         )
 
     detection = [int(x) for x in raw.get("detection_ema_windows", [50, 200, 576])]
-    chart = [int(x) for x in raw.get("chart_ema_windows", [50, 200, 576, 676])]
+    chart = [int(x) for x in raw.get("chart_ema_windows", [10, 50, 200, 576, 676])]
     tolerance = float(raw.get("ema_tolerance", 0.01))
     market_symbol = str(raw.get("market_symbol", "^TWII"))
     market_drop_1d = float(raw.get("market_drop_1d", 0.04))
@@ -118,17 +119,25 @@ def load_config(config_path: Path) -> AppConfig:
 
 
 def fetch_daily_history(yf_symbol: str) -> pd.DataFrame:
-    df = yf.Ticker(yf_symbol).history(period="3y", interval="1d", auto_adjust=False)
+    df = yf.Ticker(yf_symbol).history(period="max", interval="1d", auto_adjust=False)
     if df.empty:
         raise ValueError(f"no data from yfinance for {yf_symbol}")
     df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
     return df
 
 
+def moving_average_label(window: int) -> str:
+    return f"MA{window}" if window in {10, 50, 200} else f"EMA{window}"
+
+
 def add_ema_columns(df: pd.DataFrame, ema_windows: List[int]) -> pd.DataFrame:
     out = df.copy()
     for w in ema_windows:
-        out[f"EMA{w}"] = out["Close"].ewm(span=w, adjust=False).mean()
+        column_name = moving_average_label(w)
+        if w in {10, 50, 200}:
+            out[column_name] = out["Close"].rolling(window=w).mean()
+        else:
+            out[column_name] = out["Close"].ewm(span=w, adjust=False).mean()
     return out
 
 
@@ -136,7 +145,7 @@ def near_ema_list(latest_row: pd.Series, tolerance: float, ema_windows: List[int
     close_price = float(latest_row["Close"])
     hit_windows: List[int] = []
     for w in ema_windows:
-        ema_value = float(latest_row[f"EMA{w}"])
+        ema_value = float(latest_row[moving_average_label(w)])
         if ema_value <= 0:
             continue
         diff_ratio = abs(close_price - ema_value) / ema_value
@@ -297,7 +306,25 @@ def chart_style_no_grid() -> mpf.Style:
     return mpf.make_mpf_style(base_mpf_style="yahoo", rc={"axes.grid": False, "grid.alpha": 0.0})
 
 
+def add_symbol_watermark(ax: plt.Axes, symbol: str) -> None:
+    ax.text(
+        0.5,
+        0.52,
+        symbol,
+        transform=ax.transAxes,
+        fontsize=72,
+        color="#6b7280",
+        alpha=0.10,
+        ha="center",
+        va="center",
+        weight="bold",
+        zorder=0,
+    )
+
+
 def ema_color(window: int) -> str:
+    if window == 10:
+        return "purple"
     if window == 50:
         return "blue"
     if window == 200:
@@ -309,10 +336,12 @@ def create_daily_chart(
     df: pd.DataFrame, stock: StockItem, output_path: Path, chart_ema_windows: List[int]
 ) -> None:
     recent = df.tail(260).copy()
-    addplots = [mpf.make_addplot(recent[f"EMA{w}"], width=1.1, color=ema_color(w)) for w in chart_ema_windows]
-    ema_text = "/".join([str(w) for w in chart_ema_windows])
-    title = f"{stock.code} {stock.name_zh} - Daily K with EMA{ema_text}"
-    mpf.plot(
+    addplots = [
+        mpf.make_addplot(recent[moving_average_label(w)], width=1.1, color=ema_color(w)) for w in chart_ema_windows
+    ]
+    ema_text = "/".join([moving_average_label(w) for w in chart_ema_windows])
+    title = f"{stock.code} - Daily K with {ema_text}"
+    fig, axes = mpf.plot(
         recent,
         type="candle",
         style=chart_style_no_grid(),
@@ -322,22 +351,27 @@ def create_daily_chart(
         volume=True,
         ylabel_lower="Volume",
         figsize=(14, 8),
-        savefig=str(output_path),
+        returnfig=True,
     )
+    add_symbol_watermark(axes[0], stock.code)
+    fig.savefig(str(output_path))
+    plt.close(fig)
 
 
 def create_weekly_chart(
     df: pd.DataFrame, stock: StockItem, output_path: Path, chart_ema_windows: List[int]
 ) -> None:
     weekly = to_weekly_ohlcv(df)
-    weekly = add_ema_columns(weekly, chart_ema_windows).tail(156).copy()
+    weekly = add_ema_columns(weekly, chart_ema_windows).tail(260).copy()
     if weekly.empty:
         raise ValueError("no weekly data to chart")
 
-    addplots = [mpf.make_addplot(weekly[f"EMA{w}"], width=1.1, color=ema_color(w)) for w in chart_ema_windows]
-    ema_text = "/".join([str(w) for w in chart_ema_windows])
-    title = f"{stock.code} {stock.name_zh} - Weekly K(3Y) with EMA{ema_text}"
-    mpf.plot(
+    addplots = [
+        mpf.make_addplot(weekly[moving_average_label(w)], width=1.1, color=ema_color(w)) for w in chart_ema_windows
+    ]
+    ema_text = "/".join([moving_average_label(w) for w in chart_ema_windows])
+    title = f"{stock.code} - Weekly K(Long) with {ema_text}"
+    fig, axes = mpf.plot(
         weekly,
         type="candle",
         style=chart_style_no_grid(),
@@ -347,8 +381,11 @@ def create_weekly_chart(
         volume=True,
         ylabel_lower="Volume",
         figsize=(14, 8),
-        savefig=str(output_path),
+        returnfig=True,
     )
+    add_symbol_watermark(axes[0], stock.code)
+    fig.savefig(str(output_path))
+    plt.close(fig)
 
 
 def send_photo(token: str, chat_id: str, photo_path: Path, caption: str = "") -> None:
@@ -453,12 +490,11 @@ def main() -> None:
                 latest, tolerance=config.ema_tolerance, ema_windows=config.detection_ema_windows
             )
 
-            if not hit_windows and not stress_hit:
-                continue
+            relaxed_stress_hit = stress_hit_count >= 2
+            should_notify = bool(hit_windows) or stress_hit or relaxed_stress_hit
 
-            ema50 = float(latest["EMA50"])
-            ema200 = float(latest["EMA200"])
-            bullish = "是" if ema50 > ema200 else "否"
+            if not should_notify:
+                continue
 
             caption_lines = [
                 f"{stock.code} {stock.name_zh}",
@@ -475,41 +511,38 @@ def main() -> None:
             high_label = high_position_label(high_drawdown)
             rsi_position = rsi_position_text(rsi_value)
             ma_position = ma_position_text(close_price, ma_value, stock.stress_rule.ma_window)
-            caption_lines.append(
-                f"技術位置: {rsi_emoji} RSI {rsi_text}({rsi_label}) / "
-                f"{high_position} 距高點下跌 {high_drawdown_text}({high_label})"
-            )
+            caption_lines.append("技術位置:")
+            caption_lines.append(f"{rsi_emoji} RSI {rsi_text}({rsi_label})")
+            caption_lines.append(f"{high_position} 距高點下跌 {high_drawdown_text}({high_label})")
 
             if hit_windows:
-                near_text = ", ".join([f"EMA{w}" for w in hit_windows])
+                near_text = ", ".join([moving_average_label(w) for w in hit_windows])
                 caption_lines.append(f"接近均線: {near_text} (±{config.ema_tolerance * 100:.1f}%)")
-                caption_lines.append(f"EMA50/EMA200 多頭排列: {bullish}")
 
-            if stress_hit:
-                if hit_windows:
-                    caption_lines.append("")
-                caption_lines.append(f"風險訊號: {stress_hit_count}/4 類命中（門檻 {config.required_stress_hits}）")
+            if hit_windows:
+                caption_lines.append("")
+            caption_lines.append(f"進場訊號: {stress_hit_count}/4 類命中（門檻 {config.required_stress_hits}）")
+            caption_lines.append(
+                f"{hit_status_emoji(market_hit)} 大盤急殺: "
+                f"(1日跌幅 {fmt_drop_threshold_pct(market_drop_1d, config.market_drop_1d)} / "
+                f"5日跌幅 {fmt_drop_threshold_pct(market_drop_5d, config.market_drop_5d)})"
+            )
+            caption_lines.append(
+                f"{hit_status_emoji(stock_hit)} 超跌判斷: "
+                f"(1日 {fmt_pct(stock_drop_1d)} / 10日 {fmt_pct(stock_drop_10d)})"
+            )
+            caption_lines.append(
+                f"{hit_status_emoji(technical_hit)} 技術極端: "
+                f"({rsi_position} / {ma_position})"
+            )
+            if volume_avg_value is not None and volume_avg_value > 0:
+                vol_ratio = latest_volume / volume_avg_value
                 caption_lines.append(
-                    f"① 大盤急殺: {hit_status_emoji(market_hit)} "
-                    f"(1日跌幅 {fmt_drop_threshold_pct(market_drop_1d, config.market_drop_1d)} / "
-                    f"5日跌幅 {fmt_drop_threshold_pct(market_drop_5d, config.market_drop_5d)})"
+                    f"{hit_status_emoji(volume_hit)} 量能爆量: "
+                    f"(當日 {latest_volume:.0f}, {stock.stress_rule.volume_avg_window}日均 {volume_avg_value:.0f}, 倍數 {vol_ratio:.2f}x)"
                 )
-                caption_lines.append(
-                    f"② 超跌判斷: {hit_status_emoji(stock_hit)} "
-                    f"(1日 {fmt_pct(stock_drop_1d)} / 10日 {fmt_pct(stock_drop_10d)})"
-                )
-                caption_lines.append(
-                    f"③ 技術極端: {hit_status_emoji(technical_hit)} "
-                    f"({rsi_position} / {ma_position})"
-                )
-                if volume_avg_value is not None and volume_avg_value > 0:
-                    vol_ratio = latest_volume / volume_avg_value
-                    caption_lines.append(
-                        f"④ 量能爆量: {hit_status_emoji(volume_hit)} "
-                        f"(當日 {latest_volume:.0f}, {stock.stress_rule.volume_avg_window}日均 {volume_avg_value:.0f}, 倍數 {vol_ratio:.2f}x)"
-                    )
-                else:
-                    caption_lines.append(f"④ 量能爆量: {hit_status_emoji(volume_hit)} (資料不足)")
+            else:
+                caption_lines.append(f"{hit_status_emoji(volume_hit)} 量能爆量: (資料不足)")
 
             caption = "\n".join(caption_lines)
 
@@ -522,7 +555,7 @@ def main() -> None:
             triggered += 1
             signal_tags: List[str] = []
             if hit_windows:
-                signal_tags.append(f"EMA({', '.join([str(w) for w in hit_windows])})")
+                signal_tags.append(f"MA/EMA({', '.join([moving_average_label(w) for w in hit_windows])})")
             if stress_hit:
                 signal_tags.append(f"Stress({stress_hit_count}/4)")
             print(f"[SENT] {stock.code} {stock.name_zh}: {' + '.join(signal_tags)}")
@@ -530,7 +563,7 @@ def main() -> None:
             print(f"[ERROR] {stock.code} {stock.name_zh}: {exc}")
 
     if triggered == 0:
-        send_message(token, chat_id, "本次掃描完成：沒有商品符合 EMA 接近或風險 4 選 3 條件。")
+        send_message(token, chat_id, "本次掃描完成：沒有商品符合均線接近或進場通知條件。")
     print(f"Done. Triggered {triggered} stock(s).")
 
 

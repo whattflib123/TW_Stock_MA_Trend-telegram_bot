@@ -1,7 +1,7 @@
 {
   "ema_tolerance": 0.01,
   "detection_ema_windows": [50, 200, 576],
-  "chart_ema_windows": [50, 200, 576, 676],
+  "chart_ema_windows": [10, 50, 200, 576, 676],
   "market_symbol": "^TWII",
   "market_drop_1d": 0.04,
   "market_drop_5d": 0.08,
